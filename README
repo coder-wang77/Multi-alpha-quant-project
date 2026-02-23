@@ -1,0 +1,176 @@
+# Multi-Alpha Market-Neutral Portfolio with Convex Optimization (Quant Project)
+
+## Summary
+This project implements an end-to-end quant equity workflow: cross-sectional alpha signals → signal purification → shrinkage risk model → convex portfolio optimization with constraints and trading frictions → backtest + robustness testing.
+
+Core features:
+- Multi-alpha (Momentum, Short-term Reversal, Low-Volatility)
+- Beta-neutral signal purification
+- Ledoit–Wolf covariance shrinkage for a stable risk model
+- CVXPY optimization with leverage/position constraints + turnover penalty
+- Transaction cost modeling and sensitivity/robustness analysis
+
+**Data:** daily adjusted close prices from Yahoo Finance via `yfinance`  
+**Backtest frequency:** weekly (and monthly in robustness tests)  
+**Universe:** fixed set of liquid US equities (static list; see limitations)
+
+---
+
+## Project structure
+quant-project-A/
+notebooks/
+00_config_and_utils.ipynb
+01_data_universe.ipynb
+02_signals_and_purification.ipynb
+03_risk_model_and_optimizer.ipynb
+04_backtest_and_report.ipynb
+05_robustness_and_sensitivity.ipynb
+data/
+raw/
+processed/
+outputs/
+results/
+figures/
+
+
+
+---
+
+## Strategy overview
+
+### Signals (alphas)
+The strategy combines three cross-sectional signals:
+
+1) **12–1 Momentum (mom)**  
+   Approx: \( P_{t-21}/P_{t-252} - 1 \).  
+   Intuition: medium-term trends persist; skipping the most recent month reduces short-term reversal contamination.
+
+2) **Short-term Reversal (rev)**  
+   Approx: \(-\sum_{k=1}^{5} r_{t-k}\).  
+   Intuition: short-horizon moves partially mean-revert due to temporary order flow/liquidity shocks.
+
+3) **Low-Volatility (low-vol)**  
+   Approx: \(-\sigma_{20d}\).  
+   Intuition: low-vol names can offer better risk-adjusted performance and diversify momentum/reversal.
+
+Each signal is winsorized cross-sectionally (to reduce outliers) and z-scored cross-sectionally (so signals are comparable and can be combined).
+
+Combined forecast:
+\[
+\alpha_t = \frac{1}{3}(z_{mom,t}+z_{rev,t}+z_{lowvol,t})
+\]
+
+---
+
+## Purification (beta neutralization)
+To reduce unintended market risk, each signal is neutralized against rolling market beta.
+
+1) Rolling beta vs SPY (252-day window):
+\[
+\beta_{i,t}=\frac{\mathrm{Cov}(r_i,r_{SPY})}{\mathrm{Var}(r_{SPY})}
+\]
+
+2) Cross-sectional regression each date:
+\[
+signal_{i,t}=a_t + c_t\beta_{i,t}+\epsilon_{i,t}
+\]
+
+The residual \(\epsilon_{i,t}\) is used as the beta-neutral signal (then re-z-scored cross-sectionally).
+
+---
+
+## Risk model
+Portfolio risk is modeled using a covariance matrix estimated from trailing returns with **Ledoit–Wolf shrinkage**, improving stability vs sample covariance (especially important for optimization).
+
+---
+
+## Portfolio construction (convex optimization)
+At each rebalance date, weights \(w\) are chosen by solving:
+
+\[
+\min_w\; -\alpha^\top w \;+\;\lambda\, w^\top\Sigma w \;+\;\gamma\,\|w-w_{prev}\|_1
+\]
+
+- Return term: maximize alpha alignment
+- Risk term: penalize variance \(w^\top\Sigma w\)
+- Turnover term: L1 penalty to discourage trading
+
+### Constraints
+- Dollar neutral: \(\sum_i w_i = 0\)
+- Gross leverage cap: \(\sum_i |w_i| \le 1.0\)
+- Position cap: \(|w_i| \le 2\%\)
+- Beta neutral: \(\beta^\top w = 0\)
+
+---
+
+## Transaction costs
+Trading cost is modeled as a linear function of turnover:
+\[
+cost_t = \text{bps} \times \sum_i |w_{i,t}-w_{i,t-1}|
+\]
+Costs are deducted at each rebalance.
+
+---
+
+## Results (net of costs)
+Best configuration from robustness grid (weekly rebalance):
+- Rebalance: **W-FRI**
+- \(\lambda\) (risk aversion): **10.0**
+- \(\gamma\) (turnover penalty): **1.0**
+- Average turnover per rebalance: **~0.0206**
+
+Key metrics:
+- Annualized return: **~2.47%**
+- Annualized volatility: **~3.68%**
+- Sharpe ratio: **~0.67**
+- Max drawdown: **~8.6%**
+- Regression beta vs SPY: **~ -0.009** (close to market neutral)
+- Regression daily alpha: **~0.000103** (≈ 2.6% annualized if multiplied by 252; not a significance claim)
+
+---
+
+## Robustness testing
+A robustness grid was run across:
+- \(\lambda\) (risk aversion): [0.5, 1, 2, 5, 10]
+- \(\gamma\) (turnover penalty): [0, 0.5, 1, 2, 5]
+- transaction costs: [1, 5, 10, 20] bps
+- rebalance frequency: weekly vs monthly
+
+Key findings:
+- Performance is stable across a region rather than a single point: for **\(\gamma \approx 1\)**, Sharpe remains high across **\(\lambda \in [1,10]\)** (roughly ~0.64–0.67).
+- Turnover penalty has a large effect on trading intensity: average turnover drops sharply as \(\gamma\) increases from 0 to ~1, and becomes very low for larger \(\gamma\).
+- Sharpe declines as assumed transaction costs increase, as expected (cost sensitivity visible in the Sharpe vs cost curve).
+
+Robustness outputs:
+- `outputs/results/robustness_results.csv`
+- `outputs/results/robustness_results.parquet`
+
+---
+
+## Limitations
+- **Fixed universe / survivorship:** using a static list does not reflect historical index membership changes.
+- **Data quality:** `yfinance` data can contain missing values/corporate action quirks.
+- **Simplified cost model:** linear bps×turnover does not capture nonlinear market impact or liquidity differences.
+
+---
+
+## How to run
+Run notebooks in order:
+1) `00_config_and_utils.ipynb`
+2) `01_data_universe.ipynb`
+3) `02_signals_and_purification.ipynb`
+4) `03_risk_model_and_optimizer.ipynb`
+5) `04_backtest_and_report.ipynb`
+6) `05_robustness_and_sensitivity.ipynb`
+
+Outputs are written to:
+- `data/processed/`
+- `outputs/results/`
+
+---
+
+## Next steps
+- Add sector neutralization and/or sector exposure caps.
+- Upgrade transaction costs to a spread + impact model (e.g., bps×turnover + k×turnover²).
+- Add a 4th alpha sleeve (event proxy) and run sleeve attribution.
+- Implement strict out-of-sample evaluation (dev/test split or rolling walk-forward).
